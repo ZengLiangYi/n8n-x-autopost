@@ -4,6 +4,12 @@
 
 一个 n8n 工作流：定时抓取海外热点 → 用 DeepSeek 写出两版简中推文 → 推送到你的 Telegram，**由你点按钮决定**怎么发、发哪版 → 通过 Buffer 发到 X。
 
+<p align="center">
+  <img src="./assets/telegram-review-card.jpg" alt="Telegram 审核卡片：事件摘要、信源、配图，A/B 两版候选推文与操作按钮" width="331">
+  <br>
+  <sub>Telegram 审核卡片：一条素材、两版候选，点一下就发</sub>
+</p>
+
 ## 功能
 
 - **三个内容源轮流抓**（每次定时触发换下一个）
