@@ -1,0 +1,6 @@
+# Raw n8n exports may contain personal IDs — only commit the sanitized workflow.json
+*.local.json
+*_export*.json
+.env
+.DS_Store
+Thumbs.db

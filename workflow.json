@@ -1,0 +1,650 @@
+{
+  "name": "X Hot-Topic Auto Poster (DeepSeek + Telegram + Buffer)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "15 8,11,20 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "cron-trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        100,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ]
+      },
+      "id": "tg-trigger",
+      "name": "tg-trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        100,
+        440
+      ],
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.feedUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "rss-feed",
+      "name": "rss-feed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nlet rawData = \"\";\nif (items[0] && items[0].json) {\n  rawData = items[0].json.data || items[0].json.body || \"\";\n  if (!rawData && typeof items[0].json === \"string\") rawData = items[0].json;\n  if (!rawData) {\n    const vals = Object.values(items[0].json);\n    if (vals.length > 0 && typeof vals[0] === \"string\") rawData = vals[0];\n  }\n}\n\nconst cleanHtml = (str) => (str || \"\")\n  .replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, \"$1\")\n  .replace(/<[^>]+>/g, \" \")\n  .replace(/&amp;/g, \"&\")\n  .replace(/&apos;|&#39;|&#x27;/g, \"'\")\n  .replace(/&quot;|&#34;/g, '\"')\n  .replace(/&lt;/g, \"<\")\n  .replace(/&gt;/g, \">\")\n  .replace(/\\s+/g, \" \")\n  .trim();\n\n// 优先生成 1200x630 / 1200x600 高清大卡，彻底告别 300x168 糊图\nfunction getImageUrl(link, blockPic) {\n  if (!link || typeof link !== \"string\") {\n    return (blockPic && blockPic.startsWith(\"http\")) ? blockPic : \"\";\n  }\n  const ghMatch = link.match(/^https?:\\/\\/github\\.com\\/([^\\/]+)\\/([^\\/\\?#]+)/);\n  if (ghMatch) {\n    return `https://opengraph.githubassets.com/1/${ghMatch[1]}/${ghMatch[2]}`;\n  }\n  if (link.startsWith(\"http\") && !link.includes(\"news.ycombinator.com\") && !link.includes(\"trends.google.com\")) {\n    return `https://v1.screenshot.11ty.dev/${encodeURIComponent(link)}/opengraph/`;\n  }\n  if (blockPic && blockPic.startsWith(\"http\")) return blockPic;\n  return \"\";\n}\n\nconst staticData = $getWorkflowStaticData(\"global\");\nstaticData.seenLinks = Array.isArray(staticData.seenLinks) ? staticData.seenLinks : [];\n\nlet targetCategory = \"硬核技术\";\nlet categoryKey = \"tech\";\nlet feedUrl = \"\";\n\ntry {\n  const p = $(\"prep-feed\").first().json;\n  if (p.targetCategory) targetCategory = p.targetCategory;\n  if (p.categoryKey) categoryKey = p.categoryKey;\n  if (p.feedUrl) feedUrl = p.feedUrl;\n} catch (e) {}\n\nconst isTrends = (categoryKey === \"trends\") || (feedUrl.includes(\"trends.google.com\")) || (targetCategory.includes(\"趋势\"));\nconst candidates = [];\n\nif (isTrends) {\n  const itemRegex = /<item>([\\s\\S]*?)<\\/item>/g;\n  let match;\n  while ((match = itemRegex.exec(rawData)) !== null) {\n    const block = match[1];\n    const titleM = block.match(/<title>([\\s\\S]*?)<\\/title>/);\n    const newsM = block.match(/<ht:news_item_title>([\\s\\S]*?)<\\/ht:news_item_title>/);\n    const urlM = block.match(/<ht:news_item_url>([\\s\\S]*?)<\\/ht:news_item_url>/);\n    const trafficM = block.match(/<ht:approx_traffic>([\\s\\S]*?)<\\/ht:approx_traffic>/);\n    const picM = block.match(/<ht:picture>([\\s\\S]*?)<\\/ht:picture>/) || block.match(/<ht:news_item_picture>([\\s\\S]*?)<\\/ht:news_item_picture>/);\n\n    const title = titleM ? cleanHtml(titleM[1]) : \"\";\n    const newsTitle = newsM ? cleanHtml(newsM[1]) : \"\";\n    const newsUrl = urlM ? cleanHtml(urlM[1]) : \"\";\n    const traffic = trafficM ? cleanHtml(trafficM[1]) : \"\";\n    const picUrl = picM ? cleanHtml(picM[1]) : \"\";\n    const imageUrl = getImageUrl(newsUrl, picUrl);\n\n    if (title && newsTitle) {\n      candidates.push({\n        title: title,\n        news_event: newsTitle,\n        traffic: traffic,\n        link: newsUrl || \"https://trends.google.com/trending\",\n        image_url: imageUrl\n      });\n    }\n  }\n} else {\n  // 优先解析 Algolia HN JSON 接口（带真实项目正文 story_text 和热度数据）\n  let parsedJson = null;\n  try {\n    parsedJson = typeof rawData === \"object\" ? rawData : JSON.parse(rawData);\n  } catch (e) {}\n\n  if (parsedJson && Array.isArray(parsedJson.hits)) {\n    for (const hit of parsedJson.hits) {\n      const title = cleanHtml(hit.title);\n      const link = hit.url || `https://news.ycombinator.com/item?id=${hit.objectID}`;\n      const storyText = cleanHtml(hit.story_text).slice(0, 350);\n      const meta = `热度: ${hit.points || 0}赞 / ${hit.num_comments || 0}评论`;\n      const snippet = storyText ? `${meta} | 核心介绍: ${storyText}` : meta;\n      const imageUrl = getImageUrl(link);\n\n      if (title) {\n        candidates.push({\n          title: title,\n          link: link,\n          snippet: snippet,\n          image_url: imageUrl\n        });\n      }\n    }\n  } else {\n    // 兼容传统 XML RSS 兜底\n    const itemRegex = /<item>([\\s\\S]*?)<\\/item>/g;\n    let match;\n    while ((match = itemRegex.exec(rawData)) !== null) {\n      const block = match[1];\n      const titleM = block.match(/<title>([\\s\\S]*?)<\\/title>/);\n      const linkM = block.match(/<link>([\\s\\S]*?)<\\/link>/);\n      const descM = block.match(/<description>([\\s\\S]*?)<\\/description>/);\n      const picM = block.match(/<media:content[^>]*url=[\"']([^\"']+)[\"']/i) || block.match(/<enclosure[^>]*url=[\"']([^\"']+)[\"']/i);\n\n      const title = titleM ? cleanHtml(titleM[1]) : \"\";\n      const link = linkM ? cleanHtml(linkM[1]) : \"\";\n      const snippet = descM ? cleanHtml(descM[1]) : title;\n      const picUrl = picM ? cleanHtml(picM[1]) : \"\";\n      const imageUrl = getImageUrl(link, picUrl);\n\n      if (title && link) {\n        candidates.push({\n          title: title,\n          link: link,\n          snippet: snippet,\n          image_url: imageUrl\n        });\n      }\n    }\n  }\n}\n\n// 去重过滤\nlet unseen = candidates.filter(item => {\n  return !staticData.seenLinks.includes(item.link) && !staticData.seenLinks.includes(item.title);\n});\n\nif (unseen.length === 0 && candidates.length > 0) {\n  const currentIds = new Set();\n  candidates.forEach(c => { currentIds.add(c.link); currentIds.add(c.title); });\n  staticData.seenLinks = staticData.seenLinks.filter(id => !currentIds.has(id));\n  unseen = candidates;\n}\n\nconst finalCandidates = unseen.slice(0, 15);\n\nreturn [{\n  json: {\n    targetCategory: isTrends ? \"谷歌趋势\" : targetCategory,\n    categoryKey: isTrends ? \"trends\" : categoryKey,\n    candidates: finalCandidates\n  }\n}];"
+      },
+      "id": "code-slice",
+      "name": "code-slice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=当前目标分类：【{{ $json.targetCategory }}】\n候选素材池：\n{{ JSON.stringify($json.candidates, null, 2) }}",
+        "hasOutputParser": false,
+        "messages": {
+          "messageValues": [
+            {
+              "message": "你是一个在 X（Twitter）简中圈拥有数十万高粉互动率的个人博主（全栈开发者兼数字游民）。\n你极度擅长将海外大瓜、前沿商业与技术热点，用【最地道、最接地气、毫无AI味】的大白话讲给推友听。\n\n【核心原则一：彻底砸碎 AI 机器人的模板腔】\n❌ 绝对禁止：\n- 像通报新闻（报户口式开头：“南加州有个叫xxx的...”）\n- 冒号罗列（“操作：A B C”）\n- 陈词滥调与假深沉（“罪名坐实”、“冰山一角”、“睡得着吗”、“自嗨”）\n- 刻意的括号自我解释\n\n【核心原则二：X 移动端黄金阅读排版（必须直接换行！）】\n⚠️ 极重要排版铁律：\n1. 【严禁挤成一整坨文字】！严禁把整篇推文写在同一行或连成一长段！\n2. 【短句直接单换行（\\n）】：每一句话或一个短意思讲完，**立刻使用 \\n 换行**！\n3. 整篇推文由 3~5 个紧凑的短行构成，从上到下一眼扫完，手机端阅读极其丝滑。\n4. 全文彻底禁用中文句号「。」！换行即是自然停顿与收尾。\n5. 零外链防限流：正文严禁出现任何链接。\n\n排版示范（严格参照这个换行节奏）：\n看呆了，南加那个女医生真敢下手\n拿联邦医保当提款机，一顿操作整走4500万刀（3个多亿人民币）\n我算了半天这得开多少假单子\n现在人进去了，我就好奇她当初填单子手抖不抖\n\n【分类定制创作要求】\n\n如果目标分类是【谷歌趋势】：\n- 核心定位：海外第一手离谱大瓜与现象级热点！\n- 🅰️ 候选 A【冲浪一线・大瓜速递】：\n  * 首句直戳整件事最荒谬、最离奇的爆点（大白话）。\n  * 紧接着换行交代骚操作细节，带具体的数字感知。\n  * 尾句换行随口吐槽一句收尾，不装深沉。\n- 🅱️ 候选 B【毒舌看戏・人间清醒】：\n  * 切入点刁钻：从利益算盘、离奇脑回路或最讽刺的地方开喷。\n  * 逐句换行，金句频出，语气又损又好玩。\n\n如果目标分类是【独立商业】：\n- 结合候选池里的 snippet 背景介绍与评论热度，聚焦具体产品/工具、真实算盘、定价或获客反常识，讲透人性的生意经，逐句换行。\n\n如果目标分类是【硬核技术】：\n- 结合候选池里的背景与热度，单刀直入具体的框架、库或漏洞，指出真正在工位上写代码会踩到的恶心细节，逐句换行。\n\n【字数与输出】\n推文正文控制在 70~120 字。\n输出必须是严格合法的单行或多行 JSON 格式（JSON字符串内部的换行请务必使用转义的 \\\\n），绝不允许带有 Markdown 围栏或额外多余字符：\n{\n  \"category\": \"{{ $json.targetCategory }}\",\n  \"selected_title\": \"选中的英文原标题或关键词\",\n  \"source_url\": \"该条原文URL（供后台参考）\",\n  \"summary\": \"一句话中文事实背景（说明具体主体做了什么，核心指标）\",\n  \"candidate_a\": \"候选A正文（每句用\\\\n换行，无句号，70-120字）\",\n  \"candidate_b\": \"候选B正文（每句用\\\\n换行，无句号，70-120字）\"\n}",
+              "type": "SystemMessagePromptTemplate"
+            }
+          ]
+        }
+      },
+      "id": "chain-llm",
+      "name": "chain-llm",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.4,
+      "position": [
+        1060,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "model": "deepseek-chat"
+      },
+      "id": "ds-model",
+      "name": "ds-model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatDeepSeek",
+      "typeVersion": 1,
+      "position": [
+        960,
+        360
+      ],
+      "credentials": {
+        "deepSeekApi": {
+          "name": "DeepSeek account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $json.header }}\n📌 事件：{{ $json.summary }}\n🔗 信源：{{ $json.source_url }}\n🖼️ 配图：{{ $json.image_url ? $json.image_url : '（无配图）' }}\n\n🅰️ 【候选 A（{{ $json.label_a }}）】\n{{ $json.candidate_a }}\n\n🅱️ 【候选 B（{{ $json.label_b }}）】\n{{ $json.candidate_b }}\n\n请在手机上选择发送模式（左列 A / 右列 B）：",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🚀 A（带图直发）",
+                    "additionalFields": {
+                      "callback_data": "now_a"
+                    }
+                  },
+                  {
+                    "text": "🚀 B（带图直发）",
+                    "additionalFields": {
+                      "callback_data": "now_b"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "📝 A（纯字直发）",
+                    "additionalFields": {
+                      "callback_data": "text_a"
+                    }
+                  },
+                  {
+                    "text": "📝 B（纯字直发）",
+                    "additionalFields": {
+                      "callback_data": "text_b"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "⏱️ A 进排期",
+                    "additionalFields": {
+                      "callback_data": "queue_a"
+                    }
+                  },
+                  {
+                    "text": "⏱️ B 进排期",
+                    "additionalFields": {
+                      "callback_data": "queue_b"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "💼 换商业料",
+                    "additionalFields": {
+                      "callback_data": "fetch_biz"
+                    }
+                  },
+                  {
+                    "text": "⚡ 换技术料",
+                    "additionalFields": {
+                      "callback_data": "fetch_tech"
+                    }
+                  },
+                  {
+                    "text": "🍉 换吃瓜料",
+                    "additionalFields": {
+                      "callback_data": "fetch_trends"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "❌ 跳过丢弃",
+                    "additionalFields": {
+                      "callback_data": "ignore"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "id": "tg-send-card",
+      "name": "tg-send-card",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1460,
+        220
+      ],
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst cb = item.callback_query;\nif (!cb) return [];\n\nconst chatId = cb.message ? cb.message.chat.id : 0;\n// 安全锁：非本人操作直接拦截\nif (String(chatId) !== \"YOUR_TELEGRAM_CHAT_ID\") return [];\n\nconst data = cb.data || \"\";\nconst msgText = cb.message ? (cb.message.text || \"\") : \"\";\nconst messageId = cb.message ? cb.message.message_id : null;\nconst queryId = cb.id;\n\nif (data === \"fetch_biz\" || data === \"fetch_tech\" || data === \"fetch_trends\") {\n  let feedType = \"biz\";\n  let toast = \"💼 正在搜寻独立商业项目...\";\n  if (data === \"fetch_tech\") {\n    feedType = \"tech\";\n    toast = \"⚡ 正在搜寻硬核技术热点...\";\n  } else if (data === \"fetch_trends\") {\n    feedType = \"trends\";\n    toast = \"🍉 正在搜寻海外吃瓜热点...\";\n  }\n\n  return [{\n    json: {\n      action: \"fetch\",\n      feedType: feedType,\n      queryId: queryId,\n      chatId: chatId,\n      messageId: messageId,\n      toast: toast\n    }\n  }];\n}\n\nif (data === \"ignore\") {\n  return [{\n    json: {\n      action: \"ignore\",\n      queryId: queryId,\n      chatId: chatId,\n      messageId: messageId,\n      toast: \"🗑️ 已跳过此推文草稿\"\n    }\n  }];\n}\n\nlet selectedText = \"\";\nlet mode = data.includes(\"queue\") ? \"addToQueue\" : \"shareNow\";\nlet label = data.endsWith(\"_a\") ? \"候选 A\" : \"候选 B\";\n\nif (data.endsWith(\"_a\")) {\n  const matchA = msgText.match(/🅰️ 【候选 A[^】]*】\\n+([\\s\\S]*?)(?=\\n+🅱️)/);\n  selectedText = matchA ? matchA[1].trim() : \"\";\n} else if (data.endsWith(\"_b\")) {\n  const matchB = msgText.match(/🅱️ 【候选 B[^】]*】\\n+([\\s\\S]*?)(?=\\n+请在手机上)/);\n  selectedText = matchB ? matchB[1].trim() : \"\";\n}\n\n// 提取配图：若用户点击的是纯文本发送（text_a 或 text_b），绝不带图！\nlet imageUrl = \"\";\nconst isPureText = data.startsWith(\"text_\");\n\nif (!isPureText) {\n  const imgMatch = msgText.match(/🖼️ 配图：(https?:\\/\\/[^\\s\\n]+)/);\n  imageUrl = imgMatch ? imgMatch[1].trim() : \"\";\n}\n\nlet toast = \"\";\nif (isPureText) {\n  toast = \"📝 正在以【纯文本】直发 X...\";\n} else if (mode === \"shareNow\") {\n  toast = imageUrl ? \"🚀 正在【带图】直发 X...\" : \"🚀 正在直发 X...\";\n} else {\n  toast = imageUrl ? \"⏱️ 正在【带图】加入排期...\" : \"⏱️ 正在加入排期队列...\";\n}\n\nreturn [{\n  json: {\n    action: \"publish\",\n    queryId: queryId,\n    chatId: chatId,\n    messageId: messageId,\n    selectedLabel: label + (isPureText ? \"（纯文本）\" : (imageUrl ? \"（带图）\" : \"\")),\n    selectedText: selectedText || msgText,\n    imageUrl: imageUrl,\n    mode: mode,\n    toast: toast\n  }\n}];"
+      },
+      "id": "parse-selection",
+      "name": "parse-selection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.buffer.com",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query\": \"mutation CreatePost($input: CreatePostInput!) { createPost(input: $input) { ... on PostActionSuccess { post { id status } } ... on MutationError { message } } }\",\n  \"variables\": {\n    \"input\": {\n      \"channelId\": \"YOUR_BUFFER_CHANNEL_ID\",\n      \"text\": {{ JSON.stringify($(\"parse-selection\").item.json.selectedText) }},\n      \"mode\": \"{{ $(\"parse-selection\").item.json.mode }}\",\n      \"schedulingType\": \"automatic\",\n      \"needsApproval\": false,\n      \"assets\": {{ $(\"parse-selection\").item.json.imageUrl ? JSON.stringify([{ image: { url: $(\"parse-selection\").item.json.imageUrl } }]) : \"[]\" }}\n    }\n  }\n}"
+      },
+      "id": "buffer-post",
+      "name": "buffer-post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        600
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "editMessageText",
+        "chatId": "={{ $node['parse-selection'].json.chatId }}",
+        "messageId": "={{ $node['parse-selection'].json.messageId }}",
+        "text": "=✅ 推文已处理（{{ $node['parse-selection'].json.selectedLabel }}）\n模式：{{ $node['parse-selection'].json.mode === 'shareNow' ? '🚀 立即直发 X' : '⏱️ 加入排期队列' }}\n配图：{{ $node['parse-selection'].json.imageUrl ? '🖼️ 已携带配图' : '📝 纯文本' }}\n\n{{ $node['parse-selection'].json.selectedText }}"
+      },
+      "id": "tg-confirm",
+      "name": "tg-confirm",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1220,
+        600
+      ],
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1",
+              "leftValue": "={{ $json.callback_query ? true : false }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "tg-router",
+      "name": "tg-router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        320,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst raw = item.text || \"\";\nconst cleaned = raw.replace(/^```json\\s*/i, \"\").replace(/^```\\s*/, \"\").replace(/\\s*```$/, \"\").trim();\n\n// 强力 JSON 解析器（兼容大模型未转义物理换行符的情况）\nfunction safeParseJson(str) {\n  try {\n    return JSON.parse(str);\n  } catch (e1) {\n    try {\n      // 修复字符串值内部的真实换行符\n      const fixed = str.replace(/\"((?:[^\"\\\\]|\\\\.)*)\"/g, (match) => {\n        return match.replace(/\\r?\\n/g, \"\\\\n\");\n      });\n      return JSON.parse(fixed);\n    } catch (e2) {\n      const extract = (key) => {\n        const m = str.match(new RegExp(`\"${key}\"\\\\s*:\\\\s*\"([\\\\s\\\\S]*?)\"(?=\\\\s*,\\\\s*\"|\\\\s*})`));\n        return m ? m[1].replace(/\\\\n/g, \"\\n\") : \"\";\n      };\n      return {\n        category: extract(\"category\") || \"谷歌趋势\",\n        selected_title: extract(\"selected_title\") || \"今日海外热搜\",\n        source_url: extract(\"source_url\") || \"\",\n        summary: extract(\"summary\") || \"解析兜底：请查看候选正文\",\n        candidate_a: extract(\"candidate_a\") || str.slice(0, 120),\n        candidate_b: extract(\"candidate_b\") || str.slice(0, 120)\n      };\n    }\n  }\n}\n\nconst parsed = safeParseJson(cleaned);\n\nlet sourceUrl = parsed.source_url || \"\";\nlet imageUrl = \"\";\n\ntry {\n  const candList = $(\"code-slice\").first().json.candidates || [];\n  let matched = candList.find(c => c.title === parsed.selected_title || c.news_event === parsed.selected_title);\n  if (!matched && sourceUrl) {\n    matched = candList.find(c => c.link === sourceUrl);\n  }\n  if (!matched && candList.length > 0) {\n    matched = candList[0];\n  }\n  if (matched) {\n    if (!sourceUrl || !sourceUrl.startsWith(\"http\")) sourceUrl = matched.link;\n    if (matched.image_url) imageUrl = matched.image_url;\n  }\n} catch (e) {}\n\nfunction formatXPost(text) {\n  if (!text) return \"\";\n  let clean = text.replace(/\\\\n/g, \"\\n\").replace(/。/g, \"\");\n  if (clean.includes(\"\\n\")) {\n    const lines = clean.split(\"\\n\").map(l => l.trim()).filter(Boolean);\n    return lines.join(\"\\n\");\n  }\n  const parts = clean.split(/\\s{2,}/).map(p => p.trim()).filter(Boolean);\n  if (parts.length > 2) {\n    return parts.join(\"\\n\");\n  }\n  return clean.trim();\n}\n\nconst candidateA = formatXPost(parsed.candidate_a);\nconst candidateB = formatXPost(parsed.candidate_b);\n\nconst staticData = $getWorkflowStaticData(\"global\");\nstaticData.seenLinks = Array.isArray(staticData.seenLinks) ? staticData.seenLinks : [];\nif (sourceUrl) staticData.seenLinks.push(sourceUrl);\nif (parsed.selected_title) staticData.seenLinks.push(parsed.selected_title);\nif (staticData.seenLinks.length > 300) {\n  staticData.seenLinks = staticData.seenLinks.slice(-150);\n}\n\nconst category = parsed.category || \"谷歌趋势\";\nlet header = \"⚡ 【今日破圈技术热点】\";\nlet labelA = \"极致短句流・实名避坑\";\nlet labelB = \"短长错落流・批判对线\";\n\nif (category.includes(\"商业\") || category.includes(\"biz\")) {\n  header = \"💼 【今日独立商业・抉择拆解】\";\n  labelA = \"模式壁垒争议流\";\n  labelB = \"运营抉择二选一\";\n} else if (category.includes(\"趋势\") || category.includes(\"trends\")) {\n  header = \"🍉 【今日海外热搜・第一手吃瓜速递】\";\n  labelA = \"冲浪一线・大瓜速递\";\n  labelB = \"毒舌看戏・人间清醒\";\n}\n\nreturn [{\n  json: {\n    category: category,\n    header: header,\n    label_a: labelA,\n    label_b: labelB,\n    selected_title: parsed.selected_title || \"\",\n    source_url: sourceUrl,\n    image_url: imageUrl,\n    summary: parsed.summary || \"\",\n    candidate_a: candidateA,\n    candidate_b: candidateB\n  }\n}];"
+      },
+      "id": "clean-ds",
+      "name": "clean-ds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1260,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $json.queryId }}",
+        "additionalFields": {
+          "text": "={{ $json.toast }}"
+        }
+      },
+      "id": "tg-answer-cb",
+      "name": "tg-answer-cb",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        780,
+        440
+      ],
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1",
+              "leftValue": "={{ $(\"parse-selection\").item.json.action }}",
+              "rightValue": "publish",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-action",
+      "name": "if-action",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        780,
+        680
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "editMessageText",
+        "chatId": "={{ $node['parse-selection'].json.chatId }}",
+        "messageId": "={{ $node['parse-selection'].json.messageId }}",
+        "text": "🗑️ 已跳过并丢弃该条推文草稿。\n随时在聊天框输入 /more 、/biz 、/tech 或 /trends 获取最新热点！"
+      },
+      "id": "tg-discard-confirm",
+      "name": "tg-discard-confirm",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1000,
+        760
+      ],
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram account"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData(\"global\");\nstaticData.seenLinks = Array.isArray(staticData.seenLinks) ? staticData.seenLinks : [];\n\nlet text = \"\";\nlet feedType = \"\";\n\ntry {\n  const item = $input.item.json;\n  // 安全锁：如果是 TG 触发的消息，校验是否为本人 ChatID\n  const incomingChatId = item.message?.chat?.id || item.chatId;\n  if (incomingChatId && String(incomingChatId) !== \"YOUR_TELEGRAM_CHAT_ID\") {\n    return [];\n  }\n  if (item.message && item.message.text) {\n    text = item.message.text.trim();\n  }\n  if (item.feedType) {\n    feedType = item.feedType;\n  }\n} catch (e) {}\n\ntry {\n  if (!feedType && $(\"parse-selection\").isExecuted) {\n    const ps = $(\"parse-selection\").first().json;\n    if (ps && ps.feedType) feedType = ps.feedType;\n  }\n} catch (e) {}\n\nconst feeds = {\n  \"biz\": \"https://hn.algolia.com/api/v1/search_by_date?tags=show_hn&hitsPerPage=25\",\n  \"tech\": \"https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=25\",\n  \"trends\": \"https://trends.google.com/trending/rss?geo=US\"\n};\n\nif (text.startsWith(\"/biz\") || feedType === \"biz\") {\n  staticData.lastCategory = \"独立商业\";\n  return [{\n    json: {\n      targetCategory: \"独立商业\",\n      categoryKey: \"biz\",\n      feedUrl: feeds.biz\n    }\n  }];\n} else if (text.startsWith(\"/tech\") || feedType === \"tech\") {\n  staticData.lastCategory = \"硬核技术\";\n  return [{\n    json: {\n      targetCategory: \"硬核技术\",\n      categoryKey: \"tech\",\n      feedUrl: feeds.tech\n    }\n  }];\n} else if (text.startsWith(\"/trends\") || feedType === \"trends\") {\n  staticData.lastCategory = \"谷歌趋势\";\n  return [{\n    json: {\n      targetCategory: \"谷歌趋势\",\n      categoryKey: \"trends\",\n      feedUrl: feeds.trends\n    }\n  }];\n} else {\n  const categories = [\"独立商业\", \"硬核技术\", \"谷歌趋势\"];\n  const keys = [\"biz\", \"tech\", \"trends\"];\n  const currentIndex = categories.indexOf(staticData.lastCategory);\n  const nextIndex = (currentIndex + 1) % categories.length;\n  const nextCategory = categories[nextIndex];\n  const nextKey = keys[nextIndex];\n  staticData.lastCategory = nextCategory;\n\n  return [{\n    json: {\n      targetCategory: nextCategory,\n      categoryKey: nextKey,\n      feedUrl: feeds[nextKey]\n    }\n  }];\n}"
+      },
+      "id": "prep-feed",
+      "name": "prep-feed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1",
+              "leftValue": "={{ $(\"parse-selection\").item.json.action }}",
+              "rightValue": "fetch",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-fetch",
+      "name": "if-fetch",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        480
+      ]
+    }
+  ],
+  "connections": {
+    "cron-trigger": {
+      "main": [
+        [
+          {
+            "node": "prep-feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tg-trigger": {
+      "main": [
+        [
+          {
+            "node": "tg-router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tg-router": {
+      "main": [
+        [
+          {
+            "node": "parse-selection",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "prep-feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "code-slice": {
+      "main": [
+        [
+          {
+            "node": "chain-llm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "chain-llm": {
+      "main": [
+        [
+          {
+            "node": "clean-ds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "clean-ds": {
+      "main": [
+        [
+          {
+            "node": "tg-send-card",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ds-model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "chain-llm",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parse-selection": {
+      "main": [
+        [
+          {
+            "node": "tg-answer-cb",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "buffer-post": {
+      "main": [
+        [
+          {
+            "node": "tg-confirm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "if-action": {
+      "main": [
+        [
+          {
+            "node": "buffer-post",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "if-fetch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prep-feed": {
+      "main": [
+        [
+          {
+            "node": "rss-feed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "rss-feed": {
+      "main": [
+        [
+          {
+            "node": "code-slice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "tg-answer-cb": {
+      "main": [
+        [
+          {
+            "node": "if-action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "if-fetch": {
+      "main": [
+        [
+          {
+            "node": "prep-feed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "tg-discard-confirm",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}
