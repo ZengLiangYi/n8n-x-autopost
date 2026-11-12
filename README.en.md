@@ -8,6 +8,9 @@ An n8n workflow that pulls trending topics on a schedule, has DeepSeek draft two
 
 Publishing goes through the Buffer API, so **any platform Buffer supports will work**, not just X. Switching platforms takes one channel ID. See [Multi-platform publishing](#multi-platform-publishing).
 
+> [!WARNING]
+> This project is **for learning purposes only**. Follow each platform's rules and your local laws. You are responsible for everything you publish. See the [Disclaimer](#disclaimer).
+
 <p align="center">
   <img src="./assets/telegram-review-card.jpg" alt="Telegram review card showing summary, source, image, A/B candidate posts and action buttons" width="331">
   <br>
@@ -97,6 +100,15 @@ The `buffer-post` node calls Buffer's `createPost`. The target platform depends 
 - Make sure your posts follow each platform's automation rules (e.g. the [X automation rules](https://help.x.com/en/rules-and-policies/x-automation)) and respect the copyright of the source material. The human-approval step is there to avoid unattended bulk posting.
 - `v1.screenshot.11ty.dev` and `opengraph.githubassets.com` are free third-party services and may be rate-limited or go offline.
 - Dedup data lives in workflow static data, which is only saved during **production executions of an active workflow**. Manual test runs don't save it.
+
+## Disclaimer
+
+1. **For learning only**: this project is for learning and research on n8n workflow orchestration, LLM integration and social media APIs. **Do not use it for anything illegal or abusive.**
+2. **You own your content**: AI-generated text may contain factual errors, bias or infringing material, so review it before you publish. You alone are responsible for anything you generate or publish with this project, and for any resulting account suspension, legal dispute or other loss. The author accepts no liability.
+3. **Follow platform rules**: comply with the terms of service, developer policies and automation rules of X, Buffer, Telegram, DeepSeek and any other third-party service, as well as your local laws. Using it for account farming, engagement manipulation, spam, disinformation, or copyright or privacy violations is **prohibited**.
+4. **Respect original creators**: source material belongs to its original authors and platforms. Credit your sources and stay within fair use when you paraphrase or remix.
+5. **No warranty**: the project is provided "as is", with no guarantee that it works, stays stable or suits any purpose. Changes to third-party APIs may break it at any time. See the [MIT License](./LICENSE) for the full terms.
+6. **Acceptance**: by downloading, using or modifying this project, you confirm that you have read and agree to this disclaimer. If you don't agree, stop using it and delete it.
 
 ## License
 
